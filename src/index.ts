@@ -31,4 +31,4 @@ const server = Bun.serve({
   },
 });
 
-console.log(`Server running → ws://localhost:${server.port}`);
+console.log(`Server running → wss://localhost:${server.port}`);
