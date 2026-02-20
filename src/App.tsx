@@ -19,7 +19,7 @@ export function App() {
   useEffect(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const socket = new WebSocket("wss://localhost:3000");
+    const socket = new WebSocket("wss://chat-app-flax-two-73.vercel.app");
     wsRef.current = socket;
 
     socket.onopen = () => {
