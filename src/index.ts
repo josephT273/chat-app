@@ -20,12 +20,12 @@ const server = Bun.serve({
 		},
 
 		message(ws, message) {
-			console.log(ws)
+			console.log(ws);
 			server.publish("chat", `[${new Date().toLocaleTimeString()}] ${message}`);
 		},
 
 		close(ws, code, reason) {
-			console.log(ws)
+			console.log(ws);
 			console.log("Closed", code, reason);
 		},
 	},
