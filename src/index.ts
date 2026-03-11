@@ -1,15 +1,23 @@
 import index from "./index.html";
+import { auth } from "./lib/auth";
 
 const server = Bun.serve({
 	routes: {
+		"/api/auth/*": (req) => auth.handler(req),
 		"/*": index,
 	},
 
 	fetch(req, server) {
-		if (server.upgrade(req)) {
-			return;
+		const url = new URL(req.url);
+
+		if (url.pathname.startsWith("/ws")) {
+			if (server.upgrade(req)) {
+				return;
+			}
+			return new Response("WebSocket upgrade failed", { status: 400 });
 		}
-		return new Response("Internal Server error", { status: 500 });
+
+		return new Response("Not Found", { status: 404 });
 	},
 
 	websocket: {
