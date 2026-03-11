@@ -66,7 +66,7 @@ export function App() {
         </CardHeader>
         <CardContent className="bg-gray-100  m-5 rounded p-4">
           {log.map((l, i) => (
-            <p key={i}>{l}</p>
+            <p key={i.toExponential()}>{l}</p>
           ))}
         </CardContent>
 

@@ -4,11 +4,14 @@
  *
  * It is included in `src/index.html`.
  */
+/** biome-ignore-all lint/suspicious/noAssignInExpressions: explanation */
 
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 
+// biome-ignore lint/style/noNonNullAssertion: explanation
 const elem = document.getElementById("root")!;
+
 const app = <App />;
 
 if (import.meta.hot) {
