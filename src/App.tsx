@@ -1,98 +1,51 @@
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { useEffect, useRef, useState } from "react";
-import { Button } from "./components/ui/button";
-import { Input } from "./components/ui/input";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { AuthProvider, useAuth } from "./hooks/AuthContext";
 import "./index.css";
 
-export function App() {
-  const [status, setStatus] = useState(false);
-  const [message, setMessage] = useState<string>("");
-  const [log, setLog] = useState<string[]>([]);
-  const wsRef = useRef<WebSocket | null>(null);
+import Chat from "@/pages/chat";
+import Login from "@/pages/login";
+import Register from "@/pages/register";
 
-  useEffect(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+const PrivateRoute = ({ children }: { children: React.ReactNode }) => {
+  const { user, loading } = useAuth();
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-screen">
+        Loading...
+      </div>
+    );
+  }
 
-    const socket = new WebSocket("ws://localhost:3000/ws");
-    wsRef.current = socket;
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+  return children;
+};
 
-    socket.onopen = () => {
-      setStatus(true);
-    };
-
-    socket.onmessage = (e) => {
-      const msg = e.data.toString();
-      setLog((prev) => [...prev, msg]);
-    };
-
-    socket.onclose = () => {
-      setStatus(false);
-    };
-
-    socket.onerror = () => {
-      setStatus(false);
-    };
-
-    return () => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.close();
-      }
-    };
-  }, []);
-
-  const sendMessage = () => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(message.trim());
-      setMessage("");
-    }
-  };
+const AppRoutes = () => {
   return (
-    <div className="container mx-auto p-8 text-start relative z-10">
-      <Card className="w-125">
-        <CardHeader className="gap-4">
-          <CardTitle className="text-3xl font-bold">Chat App</CardTitle>
-          <CardDescription>
-            Simple chat app with react + bun + websocket
-            <h1 className={status ? "text-green-500" : "text-red-500"}>
-              {status ? `CONNECTED` : `DISCONNECTED`}
-            </h1>
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="bg-gray-100  m-5 rounded p-4">
-          {log.map((l, i) => (
-            <p key={i.toExponential()}>{l}</p>
-          ))}
-        </CardContent>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+        <Route
+          path="/"
+          element={
+            <PrivateRoute>
+              <Chat />
+            </PrivateRoute>
+          }
+        />
+      </Routes>
+    </BrowserRouter>
+  );
+};
 
-        <form
-          className="p-4"
-          onSubmit={(e) => {
-            e.preventDefault();
-            sendMessage();
-          }}
-        >
-          <Input
-            placeholder="Message goes here..."
-            value={message}
-            className="mb-2"
-            onChange={(e) => setMessage(e.target.value)}
-          />
-          <Button
-            type="submit"
-            disabled={!status}
-            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
-          >
-            Send Test Message
-          </Button>
-        </form>
-      </Card>
-    </div>
+export function App() {
+  return (
+    <AuthProvider>
+      <AppRoutes />
+    </AuthProvider>
   );
 }
 

@@ -1,5 +1,7 @@
+import 'dotenv/config';
 import index from "./index.html";
 import { auth } from "./lib/auth";
+
 
 const server = Bun.serve({
 	routes: {
