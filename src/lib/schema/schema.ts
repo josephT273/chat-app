@@ -1,5 +1,5 @@
 import { relations } from "drizzle-orm";
-import { boolean, index, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, index, integer, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 
 export const user = pgTable("user", {
   id: text("id").primaryKey(),
@@ -73,9 +73,45 @@ export const verification = pgTable(
   (table) => [index("verification_identifier_idx").on(table.identifier)],
 );
 
+export const chatRoom = pgTable(
+  "chat_room",
+  {
+    id: text("id").primaryKey(),
+    senderId: text("sender_id").references(() => user.id).notNull(),
+    receiverId: text("receiver_id").references(() => user.id).notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => new Date())
+      .notNull(),
+  }
+)
+
+export const message = pgTable(
+  "message",
+  {
+    id: integer("id").generatedAlwaysAsIdentity().primaryKey(),
+    message: text("message").notNull(),
+    chatRoomId: text("chat_room_id").references(() => chatRoom.id).notNull(),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => new Date())
+      .notNull(),
+  }
+);
+
 export const userRelations = relations(user, ({ many }) => ({
   sessions: many(session),
   accounts: many(account),
+
+  sentChatRooms: many(chatRoom, {
+    relationName: "sender",
+  }),
+
+  receivedChatRooms: many(chatRoom, {
+    relationName: "receiver",
+  }),
 }));
 
 export const sessionRelations = relations(session, ({ one }) => ({
@@ -89,5 +125,29 @@ export const accountRelations = relations(account, ({ one }) => ({
   user: one(user, {
     fields: [account.userId],
     references: [user.id],
+  }),
+}));
+
+export const chatRoomRelations = relations(chatRoom, ({ one, many }) => ({
+  sender: one(user, {
+    fields: [chatRoom.senderId],
+    references: [user.id],
+    relationName: "sender",
+  }),
+
+  receiver: one(user, {
+    fields: [chatRoom.receiverId],
+    references: [user.id],
+    relationName: "receiver",
+  }),
+
+  messages: many(message),
+}));
+
+
+export const messageRelations = relations(message, ({ one }) => ({
+  chatRoom: one(chatRoom, {
+    fields: [message.chatRoomId],
+    references: [chatRoom.id],
   }),
 }));
