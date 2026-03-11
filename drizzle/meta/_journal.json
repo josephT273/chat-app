@@ -15,6 +15,13 @@
       "when": 1773240182565,
       "tag": "0001_past_bromley",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1773252529660,
+      "tag": "0002_amazing_jackal",
+      "breakpoints": true
     }
   ]
 }
