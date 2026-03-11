@@ -11,7 +11,6 @@ export default function Register() {
 
   const { setUser } = useAuth();
   const navigate = useNavigate();
-  console.log(state);
 
   useEffect(() => {
     if (state.user) {
@@ -57,7 +56,7 @@ export default function Register() {
         ))}
       </div>
       <Button type="submit" className="mt-2 w-full">
-        Sign In
+        Sign Up
       </Button>
 
       <p className="w-full text-center mt-2">

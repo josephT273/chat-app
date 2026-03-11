@@ -1,11 +1,12 @@
 import "dotenv/config";
-import { and, eq, or } from "drizzle-orm";
+import { and, eq, ilike, not, or } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import index from "./index.html";
 import { auth } from "./lib/auth";
 import ChatAppEncryption from "./lib/chat/encription";
+import { generateRoomId } from "./lib/chat/generateRoom";
 import { db } from "./lib/schema/connection";
-import { chatRoom, message } from "./lib/schema/schema";
+import { chatRoom, message, user } from "./lib/schema/schema";
 
 const encryption = (key: string, iv: string) => new ChatAppEncryption(key, iv);
 
@@ -17,26 +18,84 @@ export const generateKey = (userID: string, date: Date): string => {
 		.toUpperCase();
 };
 
-export const generateRoomId = (userOne: string, userTwo: string): string => {
-	return createHash("md5")
-		.update(userOne + userTwo)
-		.digest("hex")
-		.substring(0, 16)
-		.toUpperCase();
-};
-
 type ClientMessage =
 	| { type: "join"; targetUserId: string }
-	| { type: "message"; roomId: string; text: string };
+	| { type: "message"; receiverId: string; text: string };
 
 type WSData = {
 	userId: string;
 	roomId?: string;
+	otherUserId?: string;
+};
+
+export const getUserId = async (req: Request): Promise<string | null> => {
+	const session = await auth.api.getSession({
+		headers: req.headers,
+	});
+
+	if (!session) return null;
+
+	return session.user.id;
 };
 
 const server = Bun.serve<WSData>({
 	routes: {
 		"/api/auth/*": (req: Request) => auth.handler(req),
+		"/users/:name": {
+			GET: async (req: Bun.BunRequest) => {
+				const userId = await getUserId(req);
+				if (!userId) return new Response("Unauthorized", { status: 401 });
+
+				const name = req.params.name?.trim();
+
+				if (!name || name.length < 2) {
+					return Response.json([]);
+				}
+
+				const users = await db
+					.select({
+						id: user.id,
+						name: user.name,
+						image: user.image,
+						email: user.email,
+					})
+					.from(user)
+					.where(and(not(eq(user.id, userId)), ilike(user.name, `%${name}%`)))
+					.limit(10);
+				return Response.json(
+					users.length === 0 ? { message: "No users found" } : users,
+				);
+			},
+		},
+		"/rooms": {
+			GET: async (req: Bun.BunRequest) => {
+				const userId = await getUserId(req);
+				if (!userId) return new Response("Unauthorized", { status: 401 });
+
+				const rooms = await db.query.chatRoom.findMany({
+					where: or(
+						eq(chatRoom.memberOne, userId),
+						eq(chatRoom.memberTwo, userId),
+					),
+					with: {
+						memberOne: true,
+						memberTwo: true,
+						messages: {
+							orderBy: (m, { desc }) => desc(m.createdAt),
+							limit: 1,
+						},
+					},
+				});
+
+				return Response.json(
+					rooms.map((r) => ({
+						roomId: r.id,
+						otherUser: r.memberOne.id === userId ? r.memberTwo : r.memberOne,
+						lastMessage: r.messages[0] ?? null,
+					})),
+				);
+			},
+		},
 		"/*": index,
 	},
 
@@ -44,17 +103,16 @@ const server = Bun.serve<WSData>({
 		const url = new URL(req.url);
 
 		if (url.pathname.startsWith("/ws")) {
-			const session = await auth.api.getSession({
-				headers: req.headers,
-			});
+			const session = await getUserId(req);
 
 			if (!session) {
 				return new Response("Unauthorized", { status: 401 });
 			}
 			const upgraded = server.upgrade(req, {
 				data: {
-					userId: session.user.id,
+					userId: session,
 					roomId: undefined,
+					otherUserId: undefined,
 				},
 			});
 			if (upgraded) return;
@@ -104,13 +162,11 @@ const server = Bun.serve<WSData>({
 					room = newRoom;
 				}
 
-				if (ws.data.roomId) ws.unsubscribe(ws.data.roomId);
-				if (!room) {
-					ws.send(JSON.stringify({ type: "error", message: "Invalid JSON" }));
-					return;
-				}
+				if (!room) return;
 
+				if (ws.data.roomId) ws.unsubscribe(ws.data.roomId);
 				ws.data.roomId = room.id;
+				ws.data.otherUserId = targetUserId;
 				ws.subscribe(room.id);
 
 				const history = await db.query.message.findMany({
@@ -124,25 +180,37 @@ const server = Bun.serve<WSData>({
 					JSON.stringify({
 						type: "history",
 						roomId: room.id,
-						messages: history.map((m) => ({
-							id: m.id,
-							text: encryption(
-								generateKey(userId, m.createdAt),
-								generateKey(targetUserId, m.createdAt),
-							).decryptMessage(m.message),
-							senderId: m.senderId,
-							senderName: m.sender.name,
-							createdAt: m.createdAt,
-						})),
+						messages: history.map((m) => {
+							const senderKey = generateKey(m.senderId, m.createdAt);
+							const receiverId =
+								m.senderId === room.memberOne ? room.memberTwo : room.memberOne;
+							const receiverKey = generateKey(receiverId, m.createdAt);
+
+							let text = "[encrypted]";
+							try {
+								text = encryption(senderKey, receiverKey).decryptMessage(
+									m.message,
+								);
+							} catch { }
+
+							return {
+								id: m.id,
+								text,
+								senderId: m.senderId,
+								senderName: m.sender.name,
+								createdAt: m.createdAt,
+							};
+						}),
 					}),
 				);
 				return;
 			}
 
 			if (payload.type === "message") {
-				const { roomId, text } = payload;
-
+				const { receiverId, text } = payload;
 				if (!text.trim()) return;
+
+				const roomId = generateRoomId(userId, receiverId);
 
 				const room = await db.query.chatRoom.findFirst({
 					where: and(
@@ -157,13 +225,12 @@ const server = Bun.serve<WSData>({
 				}
 
 				const now = new Date();
+				const otherUserId =
+					room.memberOne === userId ? room.memberTwo : room.memberOne;
 
 				const encrypted = encryption(
 					generateKey(userId, now),
-					generateKey(
-						room.memberOne === userId ? room.memberTwo : room.memberOne,
-						now,
-					),
+					generateKey(otherUserId, now),
 				).encryptMessage(text);
 
 				const [saved] = await db

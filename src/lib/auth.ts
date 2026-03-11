@@ -13,5 +13,6 @@ export const auth = betterAuth({
     emailAndPassword: {
         enabled: true,
     },
+    trustedOrigins: ["http://0.0.0.0:3000", "http://10.194.110.11:3000"],
     plugins: [openAPI()]
 });

@@ -67,9 +67,11 @@ export async function signUp(
             errors: validatedFields.error.flatten().fieldErrors,
         };
     }
+
+    console.log(form)
     try {
         const { data } = await authClient.signUp.email({
-            email, password, callbackURL: "/", name
+            name, email, password, callbackURL: "/"
         });
 
         return { email, password, user: data?.user };
