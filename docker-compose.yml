@@ -7,19 +7,26 @@ services:
     environment:
       PORT: 3000
       DATABASE_URL: postgresql://postgres:postgres@db:5432/chat_app
-      BETTER_AUTH_SECRET: F5dk6wWyggT6EVwimPEy0o66UYzMQg97
-      BETTER_AUTH_URL: http://localhost:3000
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
+      TRUSTED_ORIGINS: ${TRUSTED_ORIGINS}
     depends_on:
       - db
-    command: >
-      sh -c "
-      until pg_isready -h db -p 5432; do
-        echo waiting for database;
-        sleep 2;
-      done;
-      bunx drizzle-kit push &&
-      bun run start
-      "
+    entrypoint:
+      - sh
+      - -c
+      - |
+        if [ -z "$BETTER_AUTH_SECRET" ]; then
+          echo "Generating temporary BETTER_AUTH_SECRET"
+          export BETTER_AUTH_SECRET=$$(openssl rand -hex 32)
+        fi
+        until pg_isready -h db -p 5432; do
+          echo waiting for database;
+          sleep 2;
+        done;
+        bunx drizzle-kit push &&
+        bun run start
+    command: []
 
   db:
     image: postgres:15-alpine
