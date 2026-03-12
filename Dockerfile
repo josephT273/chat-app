@@ -10,6 +10,14 @@ RUN bun install --frozen-lockfile
 
 COPY . .
 
+ARG BETTER_AUTH_SECRET
+RUN if [ -z "$BETTER_AUTH_SECRET" ]; then \
+      echo "BETTER_AUTH_SECRET=$(openssl rand -hex 32)" >> .env; \
+    else \
+      echo "BETTER_AUTH_SECRET=$BETTER_AUTH_SECRET" >> .env; \
+    fi
+
+
 EXPOSE 3000
 
 CMD ["bun","run","start"]
