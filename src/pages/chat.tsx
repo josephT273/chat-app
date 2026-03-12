@@ -1,15 +1,19 @@
 /** biome-ignore-all lint/a11y/useKeyWithClickEvents: explanation */
 /** biome-ignore-all lint/a11y/noStaticElementInteractions: explanation */
-
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { useAuth } from "@/hooks/AuthContext";
 import axios from "axios";
 import type { User } from "better-auth";
 import { Search, Send, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-// ── Types ──────────────────────────────────────────────────────────
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { useAuth } from "@/hooks/AuthContext";
+import {
+  decryptMessage,
+  encryptMessage,
+  generateKey,
+} from "@/lib/chat/encryption";
+
 type ChatMessage = {
   id: number | string;
   text: string;
@@ -18,18 +22,28 @@ type ChatMessage = {
   createdAt: string | Date;
 };
 
+type LastMessage = {
+  encryptedText: string;
+  senderId: string;
+  createdAt: string;
+};
+
 type RoomEntry = {
   roomId: string;
+  memberOneId: string;
+  memberTwoId: string;
   otherUser: Pick<User, "id" | "name" | "email" | "image">;
-  lastMessage: { message: string; createdAt: string } | null;
+  lastMessage: LastMessage | null;
 };
 
 const Avatar = ({
   name,
   size = "md",
+  online,
 }: {
   name: string;
   size?: "sm" | "md" | "lg";
+  online?: boolean;
 }) => {
   const sizes = {
     sm: "w-8 h-8 text-sm",
@@ -46,12 +60,39 @@ const Avatar = ({
   ];
   const color = colors[name.charCodeAt(0) % colors.length];
   return (
-    <div
-      className={`${sizes[size]} ${color} rounded-full flex items-center justify-center font-bold text-white shrink-0`}
-    >
-      {name.charAt(0).toUpperCase()}
+    <div className="relative shrink-0">
+      <div
+        className={`${sizes[size]} ${color} rounded-full flex items-center justify-center font-bold text-white`}
+      >
+        {name.charAt(0).toUpperCase()}
+      </div>
+      {online !== undefined && (
+        <span
+          className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white ${online ? "bg-emerald-400" : "bg-slate-300"}`}
+        />
+      )}
     </div>
   );
+};
+
+const decryptLastMessage = (
+  lastMsg: LastMessage | null,
+  memberOneId: string,
+  memberTwoId: string,
+): string => {
+  if (!lastMsg) return "";
+  try {
+    const receiverId =
+      lastMsg.senderId === memberOneId ? memberTwoId : memberOneId;
+    const senderKey = generateKey(
+      lastMsg.senderId,
+      new Date(lastMsg.createdAt),
+    );
+    const receiverKey = generateKey(receiverId, new Date(lastMsg.createdAt));
+    return decryptMessage(lastMsg.encryptedText, senderKey, receiverKey);
+  } catch {
+    return "[message]";
+  }
 };
 
 export function Chat() {
@@ -68,6 +109,7 @@ export function Chat() {
   const [searching, setSearching] = useState(false);
 
   const [activeRoom, setActiveRoom] = useState<RoomEntry | null>(null);
+  const [onlineUsers, setOnlineUsers] = useState<Set<string>>(new Set());
   const activeRoomRef = useRef<RoomEntry | null>(null);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -86,9 +128,8 @@ export function Chat() {
   }, []);
 
   useEffect(() => {
-    const socket = new WebSocket("ws://localhost:3000/ws");
+    const socket = new WebSocket("ws://10.194.110.11:3000/ws");
     wsRef.current = socket;
-
     socket.onopen = () => setWsReady(true);
     socket.onclose = () => setWsReady(false);
     socket.onerror = () => setWsReady(false);
@@ -97,22 +138,50 @@ export function Chat() {
       const data = JSON.parse(e.data);
       const currentRoom = activeRoomRef.current;
 
-      if (data.type === "history") {
-        setMessages(data.messages);
+      if (data.type === "connected" || data.type === "presence") {
+        setOnlineUsers(new Set(data.onlineUsers));
         return;
       }
 
-      if (data.type === "message") {
-        const isMe = data.senderId === user?.id;
+      if (data.type === "history") {
+        const decrypted: ChatMessage[] = data.messages.map((m: any) => {
+          const receiverId =
+            m.senderId === data.memberOneId
+              ? data.memberTwoId
+              : data.memberOneId;
+          const senderKey = generateKey(m.senderId, new Date(m.createdAt));
+          const receiverKey = generateKey(receiverId, new Date(m.createdAt));
+          return {
+            id: m.id,
+            text: decryptMessage(m.encryptedText, senderKey, receiverKey),
+            senderId: m.senderId,
+            senderName: m.senderName,
+            createdAt: m.createdAt,
+          };
+        });
+        setMessages(decrypted);
+        return;
+      }
+
+      if (data.type === "message" && currentRoom) {
+        const receiverId =
+          data.senderId === data.memberOneId
+            ? data.memberTwoId
+            : data.memberOneId;
+        const senderKey = generateKey(data.senderId, new Date(data.createdAt));
+        const receiverKey = generateKey(receiverId, new Date(data.createdAt));
+        const text = decryptMessage(data.encryptedText, senderKey, receiverKey);
+
         setMessages((prev) => [
           ...prev,
           {
             id: data.id ?? Date.now(),
-            text: data.text,
+            text,
             senderId: data.senderId,
-            senderName: isMe
-              ? (user?.name ?? "You")
-              : (currentRoom?.otherUser.name ?? ""),
+            senderName:
+              data.senderId === user?.id
+                ? (user?.name ?? "")
+                : (currentRoom.otherUser.name ?? ""),
             createdAt: data.createdAt,
           },
         ]);
@@ -123,7 +192,8 @@ export function Chat() {
               ? {
                   ...r,
                   lastMessage: {
-                    message: data.text,
+                    encryptedText: data.encryptedText,
+                    senderId: data.senderId,
                     createdAt: data.createdAt,
                   },
                 }
@@ -134,8 +204,9 @@ export function Chat() {
     };
 
     return () => socket.close();
-  }, []);
+  }, [user]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: explanation>
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -161,52 +232,56 @@ export function Chat() {
     setMessages([]);
     setSearchQuery("");
     setSearchResults([]);
-
     const existing = rooms.find((r) => r.otherUser.id === otherUser.id);
-    const room = existing ?? { roomId: "", otherUser, lastMessage: null };
-
-    setActiveRoomBoth(room); // ✅ update both state and ref
-
+    const room = existing ?? {
+      roomId: "",
+      memberOneId: user?.id ?? "",
+      memberTwoId: otherUser.id,
+      otherUser,
+      lastMessage: null,
+    };
+    setActiveRoomBoth(room);
     wsRef.current?.send(
       JSON.stringify({ type: "join", targetUserId: otherUser.id }),
     );
-
-    if (!existing) {
-      setRooms((prev) => [room, ...prev]);
-    }
+    if (!existing) setRooms((prev) => [room, ...prev]);
   };
 
   const sendMessage = () => {
-    if (!input.trim() || !activeRoom?.otherUser || !wsReady) return;
+    if (!input.trim() || !activeRoom || !wsReady || !user) return;
+    const now = new Date();
+    const senderKey = generateKey(user.id, now);
+    const receiverKey = generateKey(activeRoom.otherUser.id, now);
+    const encrypted = encryptMessage(input.trim(), senderKey, receiverKey);
+
     wsRef.current?.send(
       JSON.stringify({
         type: "message",
         receiverId: activeRoom.otherUser.id,
-        text: input.trim(),
+        text: encrypted,
+        createdAt: now.toISOString(),
       }),
     );
     setInput("");
   };
 
   const isMe = (senderId: string) => senderId === user?.id;
-
-  const formatTime = (date: string | Date) =>
-    new Date(date).toLocaleTimeString([], {
+  const formatTime = (d: string | Date) =>
+    new Date(d).toLocaleTimeString([], {
       hour: "2-digit",
       minute: "2-digit",
     });
-
+  const isOnline = (userId: string) => onlineUsers.has(userId);
   return (
-    <div className="flex h-screen w-screen bg-slate-50 font-sans">
+    <div className="flex h-screen w-screen bg-slate-50">
       {/* ── Sidebar ── */}
       <aside className="w-80 bg-white border-r border-slate-200 flex flex-col shrink-0">
-        {/* Header */}
         <div className="p-4 border-b border-slate-100">
           <h1 className="text-xl font-bold text-slate-800 mb-3">Messages</h1>
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
             <input
-              className="w-full pl-9 pr-4 py-2 bg-slate-100 rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition"
+              className="w-full pl-9 pr-8 py-2 bg-slate-100 rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition"
               placeholder="Search people..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
@@ -237,7 +312,7 @@ export function Chat() {
                 onClick={() => joinRoom(u)}
                 className="flex items-center gap-3 px-4 py-3 hover:bg-slate-50 cursor-pointer transition"
               >
-                <Avatar name={u.name} size="sm" />
+                <Avatar name={u.name} size="sm" online={isOnline(u.id)} />
                 <div>
                   <p className="text-sm font-medium text-slate-800">{u.name}</p>
                   <p className="text-xs text-slate-400">{u.email}</p>
@@ -265,7 +340,10 @@ export function Chat() {
                   : "border-transparent hover:bg-slate-50"
               }`}
             >
-              <Avatar name={room.otherUser.name} />
+              <Avatar
+                name={room.otherUser.name}
+                online={isOnline(room.otherUser.id)}
+              />
               <div className="flex-1 min-w-0">
                 <div className="flex justify-between items-center">
                   <p className="text-sm font-semibold text-slate-800 truncate">
@@ -277,23 +355,25 @@ export function Chat() {
                     </span>
                   )}
                 </div>
+                {/* ✅ decrypted last message preview */}
                 <p className="text-xs text-slate-400 truncate">
-                  {room.lastMessage ? room.lastMessage.message : "Say hello 👋"}
+                  {room.lastMessage
+                    ? decryptLastMessage(
+                        room.lastMessage,
+                        room.memberOneId,
+                        room.memberTwoId,
+                      )
+                    : "Say hello 👋"}
                 </p>
               </div>
             </div>
           ))}
         </div>
 
-        {/* Current user footer */}
+        {/* Current user */}
         <div className="p-4 border-t border-slate-100 bg-slate-50">
           <div className="flex items-center gap-3">
-            <div className="relative">
-              <Avatar name={user?.name ?? "?"} size="sm" />
-              <span
-                className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white ${wsReady ? "bg-emerald-400" : "bg-slate-300"}`}
-              />
-            </div>
+            <Avatar name={user?.name ?? "?"} size="sm" online={wsReady} />
             <div className="flex-1 min-w-0">
               <p className="text-sm font-semibold text-slate-800 truncate">
                 {user?.name}
@@ -310,9 +390,12 @@ export function Chat() {
       <main className="flex-1 flex flex-col min-w-0">
         {activeRoom ? (
           <>
-            {/* Chat header — user info */}
             <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center gap-4 shrink-0">
-              <Avatar name={activeRoom.otherUser.name} size="lg" />
+              <Avatar
+                name={activeRoom.otherUser.name}
+                size="lg"
+                online={isOnline(activeRoom.otherUser.id)}
+              />
               <div>
                 <h2 className="text-lg font-bold text-slate-800">
                   {activeRoom.otherUser.name}
@@ -322,12 +405,15 @@ export function Chat() {
                 </p>
               </div>
               <div className="ml-auto flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                <span className="text-xs text-slate-400">Active</span>
+                <span
+                  className={`w-2 h-2 rounded-full ${isOnline(activeRoom.otherUser.id) ? "bg-emerald-400" : "bg-slate-300"}`}
+                />
+                <span className="text-xs text-slate-400">
+                  {isOnline(activeRoom.otherUser.id) ? "Online" : "Offline"}
+                </span>
               </div>
             </header>
 
-            {/* Messages */}
             <div className="flex-1 overflow-y-auto px-6 py-4 flex flex-col gap-3">
               {messages.length === 0 && (
                 <div className="flex-1 flex flex-col items-center justify-center text-slate-400 gap-2">
@@ -349,7 +435,7 @@ export function Chat() {
                       size="sm"
                     />
                   )}
-                  <div className={`max-w-xs lg:max-w-md xl:max-w-lg`}>
+                  <div className="max-w-xs lg:max-w-md xl:max-w-lg">
                     <div
                       className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${
                         isMe(msg.senderId)
@@ -370,7 +456,6 @@ export function Chat() {
               <div ref={bottomRef} />
             </div>
 
-            {/* Input */}
             <div className="bg-white border-t border-slate-200 p-4 shrink-0">
               <form
                 className="flex items-center gap-3"
@@ -383,7 +468,7 @@ export function Chat() {
                   className="flex-1 bg-slate-100 rounded-xl px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition"
                   placeholder={`Message ${activeRoom.otherUser.name}...`}
                   value={input}
-                  autoFocus={true}
+                  autoFocus
                   onChange={(e) => setInput(e.target.value)}
                   disabled={!wsReady}
                 />
@@ -398,7 +483,6 @@ export function Chat() {
             </div>
           </>
         ) : (
-          /* Empty state */
           <div className="flex-1 flex flex-col items-center justify-center text-slate-400 gap-3">
             <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center">
               <Send className="w-7 h-7 text-slate-400" />

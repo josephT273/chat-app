@@ -1,32 +1,22 @@
 import "dotenv/config";
 import { and, eq, ilike, not, or } from "drizzle-orm";
-import { createHash } from "node:crypto";
 import index from "./index.html";
 import { auth } from "./lib/auth";
-import ChatAppEncryption from "./lib/chat/encription";
 import { generateRoomId } from "./lib/chat/generateRoom";
 import { db } from "./lib/schema/connection";
 import { chatRoom, message, user } from "./lib/schema/schema";
 
-const encryption = (key: string, iv: string) => new ChatAppEncryption(key, iv);
-
-export const generateKey = (userID: string, date: Date): string => {
-	return createHash("md5")
-		.update(userID + date.getTime().toString())
-		.digest("hex")
-		.substring(0, 8)
-		.toUpperCase();
-};
-
 type ClientMessage =
 	| { type: "join"; targetUserId: string }
-	| { type: "message"; receiverId: string; text: string };
+	| { type: "message"; receiverId: string; text: string, createdAt: string };
 
 type WSData = {
 	userId: string;
 	roomId?: string;
 	otherUserId?: string;
 };
+
+const onlineUsers = new Set<string>();
 
 export const getUserId = async (req: Request): Promise<string | null> => {
 	const session = await auth.api.getSession({
@@ -73,10 +63,7 @@ const server = Bun.serve<WSData>({
 				if (!userId) return new Response("Unauthorized", { status: 401 });
 
 				const rooms = await db.query.chatRoom.findMany({
-					where: or(
-						eq(chatRoom.memberOne, userId),
-						eq(chatRoom.memberTwo, userId),
-					),
+					where: or(eq(chatRoom.memberOne, userId), eq(chatRoom.memberTwo, userId)),
 					with: {
 						memberOne: true,
 						memberTwo: true,
@@ -88,11 +75,23 @@ const server = Bun.serve<WSData>({
 				});
 
 				return Response.json(
-					rooms.map((r) => ({
-						roomId: r.id,
-						otherUser: r.memberOne.id === userId ? r.memberTwo : r.memberOne,
-						lastMessage: r.messages[0] ?? null,
-					})),
+					rooms.map((r) => {
+						const otherUser = r.memberOne.id === userId ? r.memberTwo : r.memberOne;
+						const lastMsg = r.messages[0] ?? null;
+						return {
+							roomId: r.id,
+							memberOneId: r.memberOne.id,
+							memberTwoId: r.memberTwo.id,
+							otherUser,
+							lastMessage: lastMsg
+								? {
+									encryptedText: lastMsg.message,
+									senderId: lastMsg.senderId,
+									createdAt: lastMsg.createdAt,
+								}
+								: null,
+						};
+					}),
 				);
 			},
 		},
@@ -124,7 +123,19 @@ const server = Bun.serve<WSData>({
 
 	websocket: {
 		async open(ws) {
-			ws.send(JSON.stringify({ type: "connected", userId: ws.data.userId }));
+			onlineUsers.add(ws.data.userId);
+			server.publish("presence", JSON.stringify({
+				type: "presence",
+				userId: ws.data.userId,
+				online: true,
+				onlineUsers: [...onlineUsers],
+			}));
+			ws.subscribe("presence");
+			ws.send(JSON.stringify({
+				type: "connected",
+				userId: ws.data.userId,
+				onlineUsers: [...onlineUsers],
+			}));
 		},
 
 		async message(ws, raw) {
@@ -176,38 +187,24 @@ const server = Bun.serve<WSData>({
 					limit: 50,
 				});
 
-				ws.send(
-					JSON.stringify({
-						type: "history",
-						roomId: room.id,
-						messages: history.map((m) => {
-							const senderKey = generateKey(m.senderId, m.createdAt);
-							const receiverId =
-								m.senderId === room.memberOne ? room.memberTwo : room.memberOne;
-							const receiverKey = generateKey(receiverId, m.createdAt);
-
-							let text = "[encrypted]";
-							try {
-								text = encryption(senderKey, receiverKey).decryptMessage(
-									m.message,
-								);
-							} catch { }
-
-							return {
-								id: m.id,
-								text,
-								senderId: m.senderId,
-								senderName: m.sender.name,
-								createdAt: m.createdAt,
-							};
-						}),
-					}),
-				);
+				ws.send(JSON.stringify({
+					type: "history",
+					roomId: room.id,
+					memberOneId: room.memberOne,
+					memberTwoId: room.memberTwo,
+					messages: history.map((m) => ({
+						id: m.id,
+						encryptedText: m.message,
+						senderId: m.senderId,
+						senderName: m.sender.name,
+						createdAt: m.createdAt,
+					})),
+				}));
 				return;
 			}
 
 			if (payload.type === "message") {
-				const { receiverId, text } = payload;
+				const { receiverId, text, createdAt } = payload;
 				if (!text.trim()) return;
 
 				const roomId = generateRoomId(userId, receiverId);
@@ -224,40 +221,34 @@ const server = Bun.serve<WSData>({
 					return;
 				}
 
-				const now = new Date();
-				const otherUserId =
-					room.memberOne === userId ? room.memberTwo : room.memberOne;
-
-				const encrypted = encryption(
-					generateKey(userId, now),
-					generateKey(otherUserId, now),
-				).encryptMessage(text);
-
+				const now = new Date(createdAt);
 				const [saved] = await db
 					.insert(message)
-					.values({
-						message: encrypted,
-						chatRoomId: roomId,
-						senderId: userId,
-						createdAt: now,
-					})
+					.values({ message: text, chatRoomId: roomId, senderId: userId, createdAt: now })
 					.returning();
 
-				server.publish(
+				server.publish(roomId, JSON.stringify({
+					type: "message",
 					roomId,
-					JSON.stringify({
-						type: "message",
-						roomId,
-						text,
-						senderId: userId,
-						createdAt: saved?.createdAt,
-					}),
-				);
+					encryptedText: text,
+					senderId: userId,
+					memberOneId: room.memberOne,
+					memberTwoId: room.memberTwo,
+					createdAt: saved?.createdAt,
+				}));
 			}
 		},
 
 		close(ws, code, reason) {
+			onlineUsers.delete(ws.data.userId);
 			if (ws.data.roomId) ws.unsubscribe(ws.data.roomId);
+			ws.unsubscribe("presence");
+			server.publish("presence", JSON.stringify({
+				type: "presence",
+				userId: ws.data.userId,
+				online: false,
+				onlineUsers: [...onlineUsers],
+			}));
 			console.log("Closed", code, reason);
 		},
 	},
