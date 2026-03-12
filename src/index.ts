@@ -29,6 +29,8 @@ export const getUserId = async (req: Request): Promise<string | null> => {
 };
 
 const server = Bun.serve<WSData>({
+	port: process.env.PORT || 3000,
+	hostname: "0.0.0.0",
 	routes: {
 		"/api/auth/*": (req: Request) => auth.handler(req),
 		"/users/:name": {

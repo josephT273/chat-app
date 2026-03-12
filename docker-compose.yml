@@ -1,0 +1,35 @@
+services:
+  app:
+    build: .
+    image: chat-app:latest
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/chat_app
+      BETTER_AUTH_SECRET: F5dk6wWyggT6EVwimPEy0o66UYzMQg97
+      BETTER_AUTH_URL: http://localhost:3000
+    depends_on:
+      - db
+    command: >
+      sh -c "
+      until pg_isready -h db -p 5432; do
+        echo waiting for database;
+        sleep 2;
+      done;
+      bunx drizzle-kit push &&
+      bun run start
+      "
+
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: chat_app
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+volumes:
+  db_data:

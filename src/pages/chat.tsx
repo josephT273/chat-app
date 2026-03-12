@@ -128,7 +128,9 @@ export function Chat() {
   }, []);
 
   useEffect(() => {
-    const socket = new WebSocket("ws://10.194.110.11:3000/ws");
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const host = window.location.host;
+    const socket = new WebSocket(`${protocol}//${host}/ws`);
     wsRef.current = socket;
     socket.onopen = () => setWsReady(true);
     socket.onclose = () => setWsReady(false);
