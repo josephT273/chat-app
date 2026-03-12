@@ -1,6 +1,5 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { openAPI } from 'better-auth/plugins';
 
 // local library
 import { db } from "@/lib/schema/connection";
@@ -13,17 +12,20 @@ export const auth = betterAuth({
     emailAndPassword: {
         enabled: true,
     },
-    trustedOrigins: ["http://localhost:3000", "http://127.0.0.1:3000"],
+    trustedOrigins: ["*"],
     advanced: {
-        crossSubDomainCookies: {
-            enabled: true
-        }
+        crossSubDomainCookies: { enabled: false },
+        defaultCookieAttributes: {
+            sameSite: "lax",
+            secure: false,
+            httpOnly: true,
+            domain: undefined,
+        },
     },
     cors: {
-        origin: "*",
+        origin: (origin: string[]) => origin,
         credentials: true,
         allowedHeaders: ["Content-Type", "Authorization"],
         methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     },
-    plugins: [openAPI()]
 });

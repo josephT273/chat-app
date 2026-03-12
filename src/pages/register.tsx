@@ -17,7 +17,7 @@ export default function Register() {
       setUser(state.user);
       navigate("/");
     }
-  }, []);
+  }, [state.user]);
   return (
     <form action={action} className="bg-white p-10 border">
       <div className="mt-2">
