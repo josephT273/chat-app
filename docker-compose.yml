@@ -18,15 +18,17 @@ services:
       - |
         if [ -z "$BETTER_AUTH_SECRET" ]; then
           echo "Generating temporary BETTER_AUTH_SECRET"
-          export BETTER_AUTH_SECRET=$$(openssl rand -hex 32)
+          export BETTER_AUTH_SECRET=$(openssl rand -hex 32)
         fi
+
         until pg_isready -h db -p 5432; do
           echo waiting for database;
           sleep 2;
-        done;
-        bunx drizzle-kit push &&
+        done
+
+        bunx drizzle-kit push
         bun run start
-    command: []
+        command: []
 
   db:
     image: postgres:15-alpine
