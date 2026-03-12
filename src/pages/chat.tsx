@@ -32,6 +32,7 @@ type RoomEntry = {
   roomId: string;
   memberOneId: string;
   memberTwoId: string;
+  unreadCount: number;
   otherUser: Pick<User, "id" | "name" | "email" | "image">;
   lastMessage: LastMessage | null;
 };
@@ -99,22 +100,26 @@ export function Chat() {
   const { user } = useAuth();
 
   const wsRef = useRef<WebSocket | null>(null);
-  const [wsReady, setWsReady] = useState(false);
+  const userRef = useRef(user);
+  const activeRoomRef = useRef<RoomEntry | null>(null);
 
+  const [wsReady, setWsReady] = useState(false);
   const [rooms, setRooms] = useState<RoomEntry[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<RoomEntry["otherUser"][]>(
     [],
   );
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const [searching, setSearching] = useState(false);
-
   const [activeRoom, setActiveRoom] = useState<RoomEntry | null>(null);
   const [onlineUsers, setOnlineUsers] = useState<Set<string>>(new Set());
-  const activeRoomRef = useRef<RoomEntry | null>(null);
-
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
 
   const setActiveRoomBoth = (room: RoomEntry | null) => {
     activeRoomRef.current = room;
@@ -123,14 +128,20 @@ export function Chat() {
 
   useEffect(() => {
     axios.get<RoomEntry[]>("/rooms").then((res) => {
-      if (Array.isArray(res.data)) setRooms(res.data);
+      if (Array.isArray(res.data)) {
+        setRooms(res.data);
+        const counts: Record<string, number> = {};
+        for (const room of res.data) {
+          counts[room.roomId] = room.unreadCount ?? 0;
+        }
+        setUnreadCounts(counts);
+      }
     });
   }, []);
 
   useEffect(() => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const host = window.location.host;
-    const socket = new WebSocket(`${protocol}//${host}/ws`);
+    const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
     wsRef.current = socket;
     socket.onopen = () => setWsReady(true);
     socket.onclose = () => setWsReady(false);
@@ -139,9 +150,15 @@ export function Chat() {
     socket.onmessage = (e) => {
       const data = JSON.parse(e.data);
       const currentRoom = activeRoomRef.current;
+      const currentUser = userRef.current;
 
       if (data.type === "connected" || data.type === "presence") {
         setOnlineUsers(new Set(data.onlineUsers));
+        return;
+      }
+
+      if (data.type === "unread_reset") {
+        setUnreadCounts((prev) => ({ ...prev, [data.roomId]: 0 }));
         return;
       }
 
@@ -165,7 +182,7 @@ export function Chat() {
         return;
       }
 
-      if (data.type === "message" && currentRoom) {
+      if (data.type === "message") {
         const receiverId =
           data.senderId === data.memberOneId
             ? data.memberTwoId
@@ -173,23 +190,33 @@ export function Chat() {
         const senderKey = generateKey(data.senderId, new Date(data.createdAt));
         const receiverKey = generateKey(receiverId, new Date(data.createdAt));
         const text = decryptMessage(data.encryptedText, senderKey, receiverKey);
+        const isActiveRoom = currentRoom?.roomId === data.roomId;
 
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: data.id ?? Date.now(),
-            text,
-            senderId: data.senderId,
-            senderName:
-              data.senderId === user?.id
-                ? (user?.name ?? "")
-                : (currentRoom.otherUser.name ?? ""),
-            createdAt: data.createdAt,
-          },
-        ]);
+        if (isActiveRoom) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: data.id ?? Date.now(),
+              text,
+              senderId: data.senderId,
+              senderName:
+                data.senderId === currentUser?.id
+                  ? (currentUser?.name ?? "")
+                  : (currentRoom?.otherUser.name ?? ""),
+              createdAt: data.createdAt,
+            },
+          ]);
+        }
 
-        setRooms((prev) =>
-          prev.map((r) =>
+        if (!isActiveRoom && data.senderId !== currentUser?.id) {
+          setUnreadCounts((prev) => ({
+            ...prev,
+            [data.roomId]: data.unreadCount ?? (prev[data.roomId] ?? 0) + 1,
+          }));
+        }
+
+        setRooms((prev) => {
+          const updated: RoomEntry[] = prev.map((r) =>
             r.roomId === data.roomId
               ? {
                   ...r,
@@ -200,15 +227,22 @@ export function Chat() {
                   },
                 }
               : r,
-          ),
-        );
+          );
+          const idx = updated.findIndex((r) => r.roomId === data.roomId);
+          if (idx > 0) {
+            const room = updated[idx] as RoomEntry;
+            const rest = updated.filter((_, i) => i !== idx);
+            return [room, ...rest];
+          }
+          return updated;
+        });
       }
     };
 
     return () => socket.close();
-  }, [user]);
+  }, []);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: explanation>
+  // biome-ignore lint/correctness/useExhaustiveDependencies: explanation
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -239,10 +273,12 @@ export function Chat() {
       roomId: "",
       memberOneId: user?.id ?? "",
       memberTwoId: otherUser.id,
+      unreadCount: 0,
       otherUser,
       lastMessage: null,
     };
     setActiveRoomBoth(room);
+    setUnreadCounts((prev) => ({ ...prev, [room.roomId || otherUser.id]: 0 }));
     wsRef.current?.send(
       JSON.stringify({ type: "join", targetUserId: otherUser.id }),
     );
@@ -255,7 +291,6 @@ export function Chat() {
     const senderKey = generateKey(user.id, now);
     const receiverKey = generateKey(activeRoom.otherUser.id, now);
     const encrypted = encryptMessage(input.trim(), senderKey, receiverKey);
-
     wsRef.current?.send(
       JSON.stringify({
         type: "message",
@@ -269,20 +304,17 @@ export function Chat() {
 
   const isMe = (senderId: string) => senderId === user?.id;
   const formatTime = (d: string | Date) =>
-    new Date(d).toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    new Date(d).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const isOnline = (userId: string) => onlineUsers.has(userId);
+
   return (
     <div className="flex h-screen w-screen bg-slate-50">
-      {/* ── Sidebar ── */}
       <aside className="w-80 bg-white border-r border-slate-200 flex flex-col shrink-0">
         <div className="p-4 border-b border-slate-100">
           <h1 className="text-xl font-bold text-slate-800 mb-3">Messages</h1>
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <input
+            <Input
               className="w-full pl-9 pr-8 py-2 bg-slate-100 rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition"
               placeholder="Search people..."
               value={searchQuery}
@@ -299,7 +331,6 @@ export function Chat() {
           </div>
         </div>
 
-        {/* Search results */}
         {searchQuery.length >= 2 && (
           <div className="border-b border-slate-100">
             <p className="px-4 py-2 text-xs font-semibold text-slate-400 uppercase tracking-wider">
@@ -324,7 +355,6 @@ export function Chat() {
           </div>
         )}
 
-        {/* Room list */}
         <div className="flex-1 overflow-y-auto">
           {rooms.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-2">
@@ -332,47 +362,60 @@ export function Chat() {
               <p className="text-xs">Search for someone to start chatting</p>
             </div>
           )}
-          {rooms.map((room) => (
-            <div
-              key={room.roomId || room.otherUser.id}
-              onClick={() => joinRoom(room.otherUser)}
-              className={`flex items-center gap-3 px-4 py-3 cursor-pointer transition border-l-2 ${
-                activeRoom?.otherUser.id === room.otherUser.id
-                  ? "bg-blue-50 border-blue-500"
-                  : "border-transparent hover:bg-slate-50"
-              }`}
-            >
-              <Avatar
-                name={room.otherUser.name}
-                online={isOnline(room.otherUser.id)}
-              />
-              <div className="flex-1 min-w-0">
-                <div className="flex justify-between items-center">
-                  <p className="text-sm font-semibold text-slate-800 truncate">
-                    {room.otherUser.name}
-                  </p>
-                  {room.lastMessage && (
-                    <span className="text-xs text-slate-400 shrink-0 ml-1">
-                      {formatTime(room.lastMessage.createdAt)}
-                    </span>
-                  )}
+          {rooms.map((room) => {
+            const roomKey = room.roomId || room.otherUser.id;
+            const unread = unreadCounts[room.roomId] ?? 0;
+            return (
+              <div
+                key={roomKey}
+                onClick={() => joinRoom(room.otherUser)}
+                className={`flex items-center gap-3 px-4 py-3 cursor-pointer transition border-l-2 ${
+                  activeRoom?.otherUser.id === room.otherUser.id
+                    ? "bg-blue-50 border-blue-500"
+                    : "border-transparent hover:bg-slate-50"
+                }`}
+              >
+                <Avatar
+                  name={room.otherUser.name}
+                  online={isOnline(room.otherUser.id)}
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="flex justify-between items-center">
+                    <p
+                      className={`text-sm truncate ${unread > 0 ? "font-bold text-slate-900" : "font-semibold text-slate-800"}`}
+                    >
+                      {room.otherUser.name}
+                    </p>
+                    {room.lastMessage && (
+                      <span className="text-xs text-slate-400 shrink-0 ml-1">
+                        {formatTime(room.lastMessage.createdAt)}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between gap-1">
+                    <p
+                      className={`text-xs truncate ${unread > 0 ? "text-slate-600 font-medium" : "text-slate-400"}`}
+                    >
+                      {room.lastMessage
+                        ? decryptLastMessage(
+                            room.lastMessage,
+                            room.memberOneId,
+                            room.memberTwoId,
+                          )
+                        : "Say hello 👋"}
+                    </p>
+                    {unread > 0 && (
+                      <span className="shrink-0 min-w-5 h-5 bg-blue-500 text-white text-xs font-bold rounded-full flex items-center justify-center px-1">
+                        {unread > 99 ? "99+" : unread}
+                      </span>
+                    )}
+                  </div>
                 </div>
-                {/* ✅ decrypted last message preview */}
-                <p className="text-xs text-slate-400 truncate">
-                  {room.lastMessage
-                    ? decryptLastMessage(
-                        room.lastMessage,
-                        room.memberOneId,
-                        room.memberTwoId,
-                      )
-                    : "Say hello 👋"}
-                </p>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
-        {/* Current user */}
         <div className="p-4 border-t border-slate-100 bg-slate-50">
           <div className="flex items-center gap-3">
             <Avatar name={user?.name ?? "?"} size="sm" online={wsReady} />
@@ -388,7 +431,6 @@ export function Chat() {
         </div>
       </aside>
 
-      {/* ── Chat area ── */}
       <main className="flex-1 flex flex-col min-w-0">
         {activeRoom ? (
           <>

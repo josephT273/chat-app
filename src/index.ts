@@ -1,14 +1,14 @@
 import "dotenv/config";
-import { and, eq, ilike, not, or } from "drizzle-orm";
+import { and, eq, ilike, not, or, sql } from "drizzle-orm";
 import index from "./index.html";
 import { auth } from "./lib/auth";
 import { generateRoomId } from "./lib/chat/generateRoom";
 import { db } from "./lib/schema/connection";
-import { chatRoom, message, user } from "./lib/schema/schema";
+import { chatRoom, message, unread, user } from "./lib/schema/schema";
 
 type ClientMessage =
 	| { type: "join"; targetUserId: string }
-	| { type: "message"; receiverId: string; text: string, createdAt: string };
+	| { type: "message"; receiverId: string; text: string; createdAt: string };
 
 type WSData = {
 	userId: string;
@@ -19,12 +19,8 @@ type WSData = {
 const onlineUsers = new Set<string>();
 
 export const getUserId = async (req: Request): Promise<string | null> => {
-	const session = await auth.api.getSession({
-		headers: req.headers,
-	});
-
+	const session = await auth.api.getSession({ headers: req.headers });
 	if (!session) return null;
-
 	return session.user.id;
 };
 
@@ -33,32 +29,22 @@ const server = Bun.serve<WSData>({
 	hostname: "0.0.0.0",
 	routes: {
 		"/api/auth/*": (req: Request) => auth.handler(req),
+
 		"/users/:name": {
 			GET: async (req: Bun.BunRequest) => {
 				const userId = await getUserId(req);
 				if (!userId) return new Response("Unauthorized", { status: 401 });
-
 				const name = req.params.name?.trim();
-
-				if (!name || name.length < 2) {
-					return Response.json([]);
-				}
-
+				if (!name || name.length < 2) return Response.json([]);
 				const users = await db
-					.select({
-						id: user.id,
-						name: user.name,
-						image: user.image,
-						email: user.email,
-					})
+					.select({ id: user.id, name: user.name, image: user.image, email: user.email })
 					.from(user)
 					.where(and(not(eq(user.id, userId)), ilike(user.name, `%${name}%`)))
 					.limit(10);
-				return Response.json(
-					users.length === 0 ? { message: "No users found" } : users,
-				);
+				return Response.json(users);
 			},
 		},
+
 		"/rooms": {
 			GET: async (req: Bun.BunRequest) => {
 				const userId = await getUserId(req);
@@ -76,6 +62,15 @@ const server = Bun.serve<WSData>({
 					},
 				});
 
+				// fetch unread counts for this user in one query
+				const unreads = await db.query.unread.findMany({
+					where: eq(unread.userId, userId),
+				});
+
+				const unreadMap = Object.fromEntries(
+					unreads.map((u) => [u.roomId, u.count])
+				);
+
 				return Response.json(
 					rooms.map((r) => {
 						const otherUser = r.memberOne.id === userId ? r.memberTwo : r.memberOne;
@@ -85,47 +80,45 @@ const server = Bun.serve<WSData>({
 							memberOneId: r.memberOne.id,
 							memberTwoId: r.memberTwo.id,
 							otherUser,
+							unreadCount: unreadMap[r.id] ?? 0,
 							lastMessage: lastMsg
-								? {
-									encryptedText: lastMsg.message,
-									senderId: lastMsg.senderId,
-									createdAt: lastMsg.createdAt,
-								}
+								? { encryptedText: lastMsg.message, senderId: lastMsg.senderId, createdAt: lastMsg.createdAt }
 								: null,
 						};
 					}),
 				);
 			},
 		},
+
 		"/*": index,
 	},
 
 	async fetch(req, server) {
 		const url = new URL(req.url);
-
 		if (url.pathname.startsWith("/ws")) {
 			const session = await getUserId(req);
-
-			if (!session) {
-				return new Response("Unauthorized", { status: 401 });
-			}
+			if (!session) return new Response("Unauthorized", { status: 401 });
 			const upgraded = server.upgrade(req, {
-				data: {
-					userId: session,
-					roomId: undefined,
-					otherUserId: undefined,
-				},
+				data: { userId: session, roomId: undefined, otherUserId: undefined },
 			});
 			if (upgraded) return;
 			return new Response("WebSocket upgrade failed", { status: 400 });
 		}
-
 		return new Response("Not Found", { status: 404 });
 	},
 
 	websocket: {
 		async open(ws) {
 			onlineUsers.add(ws.data.userId);
+			const userRooms = await db.query.chatRoom.findMany({
+				where: or(
+					eq(chatRoom.memberOne, ws.data.userId),
+					eq(chatRoom.memberTwo, ws.data.userId),
+				),
+			});
+			for (const room of userRooms) {
+				ws.subscribe(room.id);
+			}
 			server.publish("presence", JSON.stringify({
 				type: "presence",
 				userId: ws.data.userId,
@@ -156,14 +149,8 @@ const server = Bun.serve<WSData>({
 
 				let room = await db.query.chatRoom.findFirst({
 					where: or(
-						and(
-							eq(chatRoom.memberOne, userId),
-							eq(chatRoom.memberTwo, targetUserId),
-						),
-						and(
-							eq(chatRoom.memberOne, targetUserId),
-							eq(chatRoom.memberTwo, userId),
-						),
+						and(eq(chatRoom.memberOne, userId), eq(chatRoom.memberTwo, targetUserId)),
+						and(eq(chatRoom.memberOne, targetUserId), eq(chatRoom.memberTwo, userId)),
 					),
 				});
 
@@ -177,13 +164,24 @@ const server = Bun.serve<WSData>({
 
 				if (!room) return;
 
-				if (ws.data.roomId) ws.unsubscribe(ws.data.roomId);
 				ws.data.roomId = room.id;
 				ws.data.otherUserId = targetUserId;
 				ws.subscribe(room.id);
 
+				// reset unread count in DB when user opens the room
+				await db
+					.insert(unread)
+					.values({ userId, roomId: room.id, count: 0 })
+					.onConflictDoUpdate({
+						target: [unread.userId, unread.roomId],
+						set: { count: 0 },
+					});
+
+				// notify client to clear the badge
+				ws.send(JSON.stringify({ type: "unread_reset", roomId: room.id }));
+
 				const history = await db.query.message.findMany({
-					where: eq(message.chatRoomId, room?.id),
+					where: eq(message.chatRoomId, room.id),
 					with: { sender: true },
 					orderBy: (m, { asc }) => asc(m.createdAt),
 					limit: 50,
@@ -229,7 +227,21 @@ const server = Bun.serve<WSData>({
 					.values({ message: text, chatRoomId: roomId, senderId: userId, createdAt: now })
 					.returning();
 
-				server.publish(roomId, JSON.stringify({
+				// increment unread count in DB for the receiver only
+				await db
+					.insert(unread)
+					.values({ userId: receiverId, roomId, count: 1 })
+					.onConflictDoUpdate({
+						target: [unread.userId, unread.roomId],
+						set: { count: sql`${unread.count} + 1` },
+					});
+
+				// fetch updated count to send to receiver
+				const updatedUnread = await db.query.unread.findFirst({
+					where: and(eq(unread.userId, receiverId), eq(unread.roomId, roomId)),
+				});
+
+				const outgoing = JSON.stringify({
 					type: "message",
 					roomId,
 					encryptedText: text,
@@ -237,13 +249,16 @@ const server = Bun.serve<WSData>({
 					memberOneId: room.memberOne,
 					memberTwoId: room.memberTwo,
 					createdAt: saved?.createdAt,
-				}));
+					unreadCount: updatedUnread?.count ?? 1,
+				});
+
+				server.publish(roomId, outgoing);
+				ws.send(outgoing);
 			}
 		},
 
 		close(ws, code, reason) {
 			onlineUsers.delete(ws.data.userId);
-			if (ws.data.roomId) ws.unsubscribe(ws.data.roomId);
 			ws.unsubscribe("presence");
 			server.publish("presence", JSON.stringify({
 				type: "presence",

@@ -1,5 +1,5 @@
 import { relations } from "drizzle-orm";
-import { boolean, index, integer, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, index, integer, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const user = pgTable("user", {
   id: text("id").primaryKey(),
@@ -110,20 +110,35 @@ export const message = pgTable(
   ]
 );
 
+export const unread = pgTable(
+  "unread",
+  {
+    id: integer("id").generatedAlwaysAsIdentity().primaryKey(),
+    userId: text("user_id").references(() => user.id, { onDelete: "cascade" }).notNull(),
+    roomId: text("room_id").references(() => chatRoom.id, { onDelete: "cascade" }).notNull(),
+    count: integer("count").default(0).notNull(),
+  },
+  (table) => [
+    index("unread_user_idx").on(table.userId),
+    index("unread_room_idx").on(table.roomId),
+    uniqueIndex("unread_user_room_unique").on(table.userId, table.roomId),
+  ]
+);
+
+export const unreadRelations = relations(unread, ({ one }) => ({
+  user: one(user, { fields: [unread.userId], references: [user.id] }),
+  room: one(chatRoom, { fields: [unread.roomId], references: [chatRoom.id] }),
+}));
+
 export const userRelations = relations(user, ({ many }) => ({
   sessions: many(session),
   accounts: many(account),
-
-  memberOneRooms: many(chatRoom, {
-    relationName: "memberOne",
-  }),
-
-  memberTwoRooms: many(chatRoom, {
-    relationName: "memberTwo",
-  }),
-
+  memberOneRooms: many(chatRoom, { relationName: "memberOne" }),
+  memberTwoRooms: many(chatRoom, { relationName: "memberTwo" }),
   messages: many(message),
+  unreads: many(unread),
 }));
+
 
 export const sessionRelations = relations(session, ({ one }) => ({
   user: one(user, {
